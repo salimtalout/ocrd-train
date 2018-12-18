@@ -4,17 +4,13 @@ SHELL := /bin/bash
 LOCAL := $(PWD)/usr
 PATH := $(LOCAL)/bin:$(PATH)
 TESSDATA =  $(LOCAL)/share/tessdata
+LANGDATA = $(PWD)/langdata-$(LANGDATA_VERSION)
 
 # Name of the model to be built. Default: $(MODEL_NAME)
 MODEL_NAME = foo
 
-# Name of the model to continue from. Default: '$(START_MODEL)'
-START_MODEL = 
-
-LAST_CHECKPOINT = data/checkpoints/$(MODEL_NAME)_checkpoint
-
-# Name of the proto model. Default: '$(PROTO_MODEL)'
-PROTO_MODEL = data/$(MODEL_NAME)/$(MODEL_NAME).traineddata
+# Name of the model to continue from. Default: '$(CONTINUE_FROM)'
+CONTINUE_FROM = 
 
 # No of cores to use for compiling leptonica/tesseract. Default: $(CORES)
 CORES = 4
@@ -25,11 +21,14 @@ LEPTONICA_VERSION := 1.75.3
 # Tesseract commit. Default: $(TESSERACT_VERSION)
 TESSERACT_VERSION := fd492062d08a2f55001a639f2015b8524c7e9ad4
 
+# Tesseract langdata version. Default: $(LANGDATA_VERSION)
+LANGDATA_VERSION := master
+
 # Tesseract model repo to use. Default: $(TESSDATA_REPO)
 TESSDATA_REPO = _fast
 
-# Ground truth directory. Default: $(GROUND_TRUTH_DIR)
-GROUND_TRUTH_DIR := data/ground-truth
+# Train directory. Default: $(TRAIN)
+TRAIN := data/train
 
 # Normalization Mode - see src/training/language_specific.sh for details. Default: $(NORM_MODE)
 NORM_MODE = 2
@@ -53,18 +52,19 @@ help:
 	@echo "    leptonica        Build leptonica"
 	@echo "    tesseract        Build tesseract"
 	@echo "    tesseract-langs  Download tesseract-langs"
+	@echo "    langdata         Download langdata"
 	@echo "    clean            Clean all generated files"
 	@echo ""
 	@echo "  Variables"
 	@echo ""
 	@echo "    MODEL_NAME         Name of the model to be built. Default: $(MODEL_NAME)"
-	@echo "    START_MODEL        Name of the model to continue from. Default: '$(START_MODEL)'"
-	@echo "    PROTO_MODEL        Name of the proto model. Default: '$(PROTO_MODEL)'"
+	@echo "    CONTINUE_FROM      Name of the model to continue from. Default: $(CONTINUE_FROM)"
 	@echo "    CORES              No of cores to use for compiling leptonica/tesseract. Default: $(CORES)"
 	@echo "    LEPTONICA_VERSION  Leptonica version. Default: $(LEPTONICA_VERSION)"
 	@echo "    TESSERACT_VERSION  Tesseract commit. Default: $(TESSERACT_VERSION)"
+	@echo "    LANGDATA_VERSION   Tesseract langdata version. Default: $(LANGDATA_VERSION)"
 	@echo "    TESSDATA_REPO      Tesseract model repo to use. Default: $(TESSDATA_REPO)"
-	@echo "    GROUND_TRUTH_DIR   Ground truth directory. Default: $(GROUND_TRUTH_DIR)"
+	@echo "    TRAIN              Train directory. Default: $(TRAIN)"
 	@echo "    NORM_MODE          Normalization Mode - see src/training/language_specific.sh for details. Default: $(NORM_MODE)"
 	@echo "    PSM                Page segmentation mode. Default: $(PSM)"
 	@echo "    RATIO_TRAIN        Ratio of train / eval training data. Default: $(RATIO_TRAIN)"
@@ -93,74 +93,55 @@ data/list.eval: $(ALL_LSTMF)
 # Start training
 training: data/$(MODEL_NAME).traineddata
 
-ifdef START_MODEL
+ifdef CONTINUE_FROM
 data/unicharset: $(ALL_BOXES)
-	mkdir -p data/$(START_MODEL)
-	combine_tessdata -u $(TESSDATA)/$(START_MODEL).traineddata  data/$(START_MODEL)/$(START_MODEL)
-	unicharset_extractor --output_unicharset "$(GROUND_TRUTH_DIR)/my.unicharset" --norm_mode $(NORM_MODE) "$(ALL_BOXES)"
-	merge_unicharsets data/$(START_MODEL)/$(START_MODEL).lstm-unicharset $(GROUND_TRUTH_DIR)/my.unicharset  "$@"
+	combine_tessdata -u $(TESSDATA)/$(CONTINUE_FROM).traineddata  $(TESSDATA)/$(CONTINUE_FROM).
+	unicharset_extractor --output_unicharset "$(TRAIN)/my.unicharset" --norm_mode $(NORM_MODE) "$(ALL_BOXES)"
+	merge_unicharsets $(TESSDATA)/$(CONTINUE_FROM).lstm-unicharset $(TRAIN)/my.unicharset  "$@"
 else
 data/unicharset: $(ALL_BOXES)
 	unicharset_extractor --output_unicharset "$@" --norm_mode 1 "$(ALL_BOXES)"
 endif
 
-$(ALL_BOXES): $(sort $(patsubst %.tif,%.box,$(wildcard $(GROUND_TRUTH_DIR)/*.tif)))
-	find $(GROUND_TRUTH_DIR) -name '*.box' -exec cat {} \; > "$@"
+$(ALL_BOXES): $(sort $(patsubst %.tif,%.box,$(wildcard $(TRAIN)/*.tif)))
+	find $(TRAIN) -name '*.box' -exec cat {} \; > "$@"
 
-$(GROUND_TRUTH_DIR)/%.box: $(GROUND_TRUTH_DIR)/%.tif $(GROUND_TRUTH_DIR)/%.gt.txt
-	python generate_line_box.py -i "$(GROUND_TRUTH_DIR)/$*.tif" -t "$(GROUND_TRUTH_DIR)/$*.gt.txt" > "$@"
+$(TRAIN)/%.box: $(TRAIN)/%.tif $(TRAIN)/%.gt.txt
+	python generate_line_box.py -i "$(TRAIN)/$*.tif" -t "$(TRAIN)/$*.gt.txt" > "$@"
 
-$(ALL_LSTMF): $(sort $(patsubst %.tif,%.lstmf,$(wildcard $(GROUND_TRUTH_DIR)/*.tif)))
-	find $(GROUND_TRUTH_DIR) -name '*.lstmf' -exec echo {} \; | sort -R -o "$@"
+$(ALL_LSTMF): $(sort $(patsubst %.tif,%.lstmf,$(wildcard $(TRAIN)/*.tif)))
+	find $(TRAIN) -name '*.lstmf' -exec echo {} \; | sort -R -o "$@"
 
-$(GROUND_TRUTH_DIR)/%.lstmf: $(GROUND_TRUTH_DIR)/%.box
-	tesseract $(GROUND_TRUTH_DIR)/$*.tif $(GROUND_TRUTH_DIR)/$* --psm $(PSM) lstm.train
+$(TRAIN)/%.lstmf: $(TRAIN)/%.box
+	tesseract $(TRAIN)/$*.tif $(TRAIN)/$* --psm $(PSM) lstm.train
 
 # Build the proto model
-proto-model: $(PROTO_MODEL)
+proto-model: data/$(MODEL_NAME)/$(MODEL_NAME).traineddata
 
-$(PROTO_MODEL): data/unicharset data/radical-stroke.txt
+data/$(MODEL_NAME)/$(MODEL_NAME).traineddata: $(LANGDATA) data/unicharset
 	combine_lang_model \
 	  --input_unicharset data/unicharset \
-	  --script_dir data/ \
+	  --script_dir $(LANGDATA) \
 	  --output_dir data/ \
 	  --lang $(MODEL_NAME)
 
-ifdef START_MODEL
-$(LAST_CHECKPOINT): unicharset lists $(PROTO_MODEL)
+data/checkpoints/$(MODEL_NAME)_checkpoint: unicharset lists proto-model
 	mkdir -p data/checkpoints
 	lstmtraining \
-	  --traineddata $(PROTO_MODEL) \
-          --old_traineddata $(TESSDATA)/$(START_MODEL).traineddata \
-	  --continue_from data/$(START_MODEL)/$(START_MODEL).lstm \
+	  --traineddata data/$(MODEL_NAME)/$(MODEL_NAME).traineddata \
 	  --net_spec "[1,36,0,1 Ct3,3,16 Mp3,3 Lfys48 Lfx96 Lrx96 Lfx256 O1c`head -n1 data/unicharset`]" \
 	  --model_output data/checkpoints/$(MODEL_NAME) \
 	  --learning_rate 20e-4 \
 	  --train_listfile data/list.train \
 	  --eval_listfile data/list.eval \
 	  --max_iterations 10000
-else
-$(LAST_CHECKPOINT): unicharset lists $(PROTO_MODEL)
-	mkdir -p data/checkpoints
-	lstmtraining \
-	  --traineddata $(PROTO_MODEL) \
-	  --net_spec "[1,36,0,1 Ct3,3,16 Mp3,3 Lfys48 Lfx96 Lrx96 Lfx256 O1c`head -n1 data/unicharset`]" \
-	  --model_output data/checkpoints/$(MODEL_NAME) \
-	  --learning_rate 20e-4 \
-	  --train_listfile data/list.train \
-	  --eval_listfile data/list.eval \
-	  --max_iterations 10000
-endif
 
-data/$(MODEL_NAME).traineddata: $(LAST_CHECKPOINT)
+data/$(MODEL_NAME).traineddata: data/checkpoints/$(MODEL_NAME)_checkpoint
 	lstmtraining \
 	--stop_training \
-	--continue_from $(LAST_CHECKPOINT) \
-	--traineddata $(PROTO_MODEL) \
+	--continue_from $^ \
+	--traineddata data/$(MODEL_NAME)/$(MODEL_NAME).traineddata \
 	--model_output $@
-
-data/radical-stroke.txt:
-	wget -O$@ 'https://github.com/tesseract-ocr/langdata_lstm/raw/master/radical-stroke.txt'
 
 # Build leptonica
 leptonica: leptonica.built
@@ -200,13 +181,20 @@ tesseract-$(TESSERACT_VERSION):
 # Download tesseract-langs
 tesseract-langs: $(TESSDATA)/eng.traineddata
 
+# Download langdata
+langdata: $(LANGDATA)
+
+$(LANGDATA):
+	wget 'https://github.com/tesseract-ocr/langdata/archive/$(LANGDATA_VERSION).zip'
+	unzip $(LANGDATA_VERSION).zip
+
 $(TESSDATA)/eng.traineddata:
 	cd $(TESSDATA) && wget https://github.com/tesseract-ocr/tessdata$(TESSDATA_REPO)/raw/master/$(notdir $@)
 
 # Clean all generated files
 clean:
-	find $(GROUND_TRUTH_DIR) -name '*.box' -delete
-	find $(GROUND_TRUTH_DIR) -name '*.lstmf' -delete
+	find data/train -name '*.box' -delete
+	find data/train -name '*.lstmf' -delete
 	rm -rf data/all-*
 	rm -rf data/list.*
 	rm -rf data/$(MODEL_NAME)
